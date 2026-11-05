@@ -41,14 +41,14 @@ VPNGATE_MIRROR = os.environ.get(
     "VPNGATE_MIRROR",
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json",
 )
-# 默认 Worker 已失效。可通过环境变量 CHECK_WORKER 覆盖。
-# Worker 全部失败时会自动回退：把节点标记为可用并输出（保证 nodes.txt 有内容）。
+# 默认 Worker 已失效，请通过环境变量 CHECK_WORKER 覆盖为你自己部署的检测地址
+# Worker 全部失败时会自动回退：把节点标记为可用并输出（保证 nodes.txt 有内容）
 WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://yezhetian2000.ccwu.cc/check?sstp=vpn:vpn@")
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "16")))
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "25"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "60"))
-# 设为 1 时完全跳过检测，直接输出
+# 设为 1 时完全跳过检测，直接输出全部 SSTP 节点
 SKIP_CHECK = os.environ.get("SKIP_CHECK", "0").strip() in ("1", "true", "True", "yes")
 PUBLIC_DIR = os.environ.get("PUBLIC_DIR", os.path.join(REPO_DIR, "public"))
 TEMPLATE_HTML = os.path.join(REPO_DIR, "web", "index.html")
@@ -420,13 +420,10 @@ def build_outputs(results, raw_count, sstp_count, source):
 
 def build_nodes_text(data, edge_hosts):
     """
-    生成标准 edgetunnel 自定义优选格式（每行 = 入口地址#名字）
-    已去掉 $sstp:// 部分，兼容普通 edgetunnel。
+    生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://...
     """
     countries = data["countries"]
     edge = edge_hosts
-    if not edge:
-        edge = ["1.1.1.1:443"]  # 兜底，防止空列表
     lines = []
     idx = 0
     ordered = sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])))
@@ -439,11 +436,11 @@ def build_nodes_text(data, edge_hosts):
         for i, n in enumerate(res_nodes, 1):
             entry = edge[idx % len(edge)]
             idx += 1
-            lines.append(f"{entry}#{zh}-住宅-{i:02d}")
+            lines.append(f"{entry}#{zh}-住宅-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
         for i, n in enumerate(dc_nodes, 1):
             entry = edge[idx % len(edge)]
             idx += 1
-            lines.append(f"{entry}#{zh}-机房-{i:02d}")
+            lines.append(f"{entry}#{zh}-机房-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
     return "\n".join(lines) + "\n"
 
 def write_outputs(data, edge_hosts):
@@ -526,10 +523,11 @@ def main():
         log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
         log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
 
-        # Worker 全部异常时自动回退，保证 nodes.txt 有内容
+        # Worker 全部异常时自动回退，保证 nodes.txt 有内容（含 $sstp:// 格式）
         if uniq and not success and len(worker_errors) == len(uniq):
             log("CLOUDFLARE WORKER", "警告：Worker 全部请求异常，自动回退为「未检测直接输出」模式")
             log("CLOUDFLARE WORKER", f"当前 Worker 地址: {WORKER_CHECK_URL}")
+            log("CLOUDFLARE WORKER", "请尽快部署自己的检测 Worker 并设置 CHECK_WORKER")
             results = []
             for n in uniq:
                 item = dict(n)

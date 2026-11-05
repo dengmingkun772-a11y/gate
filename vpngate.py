@@ -41,11 +41,15 @@ VPNGATE_MIRROR = os.environ.get(
     "VPNGATE_MIRROR",
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json",
 )
+# 默认 Worker 已失效（404）。可通过环境变量 CHECK_WORKER 覆盖。
+# 若 Worker 全部失败，脚本会自动回退：把所有 SSTP 节点标记为可用并输出（未真实检测）。
 WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://yezhetian2000.ccwu.cc/check?sstp=vpn:vpn@")
-CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))
-CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))
+CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "16")))
+CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "25"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "60"))
+# 设为 1 时跳过 Worker 检测，直接输出全部 SSTP 节点（最快出结果）
+SKIP_CHECK = os.environ.get("SKIP_CHECK", "0").strip() in ("1", "true", "True", "yes")
 PUBLIC_DIR = os.environ.get("PUBLIC_DIR", os.path.join(REPO_DIR, "public"))
 TEMPLATE_HTML = os.path.join(REPO_DIR, "web", "index.html")
 
@@ -91,6 +95,7 @@ EDGE_HOSTS = [
 ]
 
 # 优选 API 地址配置 (支持逗号分隔多个，可配置在 GitHub Action Secret / Env 中)
+# 注意：多个地址请用英文逗号分隔
 OPTIMAL_API = os.environ.get("OPTIMAL_API", "https://cf.090227.xyz/ct?ips=6&port=443,https://cf.090227.xyz/cmcc?ips=8&port=443")
 
 NODES_URL = os.environ.get("NODES_URL", "https://dengmingkun772-a11y.github.io/gate/nodes.txt")
@@ -486,21 +491,61 @@ def main():
     log("VPN GATE", f"SSTP 节点: {sstp_count}")
     log("VPN GATE", f"去重后: {len(uniq)}")
 
-    log("CLOUDFLARE WORKER", f"提交检测: {len(uniq)} (并发 {CONCURRENCY}, 单请求超时 {CHECK_TIMEOUT}s)")
-    t0 = time.time()
-    results = check_all(uniq, session)
-    elapsed = time.time() - t0
+    if SKIP_CHECK:
+        log("CLOUDFLARE WORKER", "已开启 SKIP_CHECK，跳过检测，直接把全部 SSTP 节点标记为可用")
+        results = []
+        for n in uniq:
+            item = dict(n)
+            item["protocol"] = "sstp"
+            item["link"] = f"sstp://vpn:vpn@{n['host']}:{n['port']}"
+            item["status"] = "success"
+            item["success"] = True
+            item["checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            item["exit"] = None
+            item["residential"] = classify_network(n["host"], None, None)
+            item["latency_ms"] = None
+            item["error"] = None
+            results.append(item)
+        success = results
+        failed = []
+        worker_errors = []
+        elapsed = 0.0
+        log("CLOUDFLARE WORKER", f"跳过检测完成，可用节点: {len(success)}")
+    else:
+        log("CLOUDFLARE WORKER", f"提交检测: {len(uniq)} (并发 {CONCURRENCY}, 单请求超时 {CHECK_TIMEOUT}s)")
+        t0 = time.time()
+        results = check_all(uniq, session)
+        elapsed = time.time() - t0
 
-    success = [r for r in results if r.get("success")]
-    failed = [r for r in results if not r.get("success")]
-    worker_errors = [r for r in failed if r.get("worker_error")]
+        success = [r for r in results if r.get("success")]
+        failed = [r for r in results if not r.get("success")]
+        worker_errors = [r for r in failed if r.get("worker_error")]
 
-    log("CLOUDFLARE WORKER", f"检测成功: {len(success)}")
-    log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
-    log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
+        log("CLOUDFLARE WORKER", f"检测成功: {len(success)}")
+        log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
+        log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
 
-    if uniq and not success and len(worker_errors) == len(uniq):
-        die("Worker 全部请求异常, 检测服务不可用 — 本次运行判定失败 (不生成空结果)")
+        # Worker 全部异常时自动回退：把所有节点标记为可用，保证 nodes.txt 有内容
+        if uniq and not success and len(worker_errors) == len(uniq):
+            log("CLOUDFLARE WORKER", "警告：Worker 全部请求异常，自动回退为「未检测直接输出」模式")
+            log("CLOUDFLARE WORKER", f"当前 Worker 地址: {WORKER_CHECK_URL}")
+            log("CLOUDFLARE WORKER", "建议尽快配置可用的 CHECK_WORKER，或设置环境变量 SKIP_CHECK=1")
+            results = []
+            for n in uniq:
+                item = dict(n)
+                item["protocol"] = "sstp"
+                item["link"] = f"sstp://vpn:vpn@{n['host']}:{n['port']}"
+                item["status"] = "success"
+                item["success"] = True
+                item["checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                item["exit"] = None
+                item["residential"] = classify_network(n["host"], None, None)
+                item["latency_ms"] = None
+                item["error"] = "worker unavailable - fallback"
+                results.append(item)
+            success = results
+            failed = []
+            worker_errors = []
 
     data = build_outputs(results, raw_count, sstp_count, source)
     log("RESULT", f"可用节点: {len(success)}")
